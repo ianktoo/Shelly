@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
+import { GoogleGenAI, Modality, LiveServerMessage, Type, FunctionDeclaration } from '@google/genai';
 import TurtleAvatar from './components/TurtleAvatar';
 import TeacherDashboard from './components/TeacherDashboard';
 import MarketingSection from './components/MarketingSection';
@@ -15,6 +15,38 @@ const SHELLIE_VOICES = [
   { id: 'Kore', label: 'Kind', icon: '💖' },
   { id: 'Fenrir', label: 'Deep', icon: '🌊' },
   { id: 'Zephyr', label: 'Cheerful', icon: '☀️' }
+];
+
+// Tool Declarations
+const toolDeclarations: FunctionDeclaration[] = [
+  {
+    name: 'getCurrentTime',
+    parameters: {
+      type: Type.OBJECT,
+      description: 'Get the current local time, date, and day of the week.',
+      properties: {},
+    },
+  },
+  {
+    name: 'getCurrentLocation',
+    parameters: {
+      type: Type.OBJECT,
+      description: 'Get the user\'s current geographical location (latitude and longitude).',
+      properties: {},
+    },
+  },
+  {
+    name: 'getWeather',
+    parameters: {
+      type: Type.OBJECT,
+      description: 'Get the current weather for a specific location.',
+      properties: {
+        latitude: { type: Type.NUMBER, description: 'Latitude of the location.' },
+        longitude: { type: Type.NUMBER, description: 'Longitude of the location.' },
+      },
+      required: ['latitude', 'longitude'],
+    },
+  }
 ];
 
 const App: React.FC = () => {
@@ -80,6 +112,45 @@ const App: React.FC = () => {
     setIsMuted(newState);
     isMutedRef.current = newState;
   }, [isMuted]);
+
+  // Tool Implementations
+  const executeTool = async (name: string, args: any) => {
+    switch (name) {
+      case 'getCurrentTime':
+        return { 
+          time: new Date().toLocaleTimeString(), 
+          date: new Date().toLocaleDateString(),
+          day: new Date().toLocaleDateString('en-US', { weekday: 'long' })
+        };
+      
+      case 'getCurrentLocation':
+        return new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+            (err) => resolve({ error: "Could not access location: " + err.message }),
+            { timeout: 5000 }
+          );
+        });
+
+      case 'getWeather':
+        try {
+          const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${args.latitude}&longitude=${args.longitude}&current_weather=true`);
+          const data = await res.json();
+          return {
+            temperature: data.current_weather.temperature,
+            unit: 'Celsius',
+            windspeed: data.current_weather.windspeed,
+            condition_code: data.current_weather.weathercode,
+            description: "The weather is currently being fetched from a real-time meteorological service."
+          };
+        } catch (e) {
+          return { error: "Failed to fetch weather data." };
+        }
+
+      default:
+        return { error: "Unknown tool requested." };
+    }
+  };
 
   const handleSafetyAndTermination = useCallback((text: string) => {
     if (!text.trim()) return;
@@ -158,11 +229,27 @@ const App: React.FC = () => {
 
             sessionPromise.then(session => {
               session.sendRealtimeInput({ 
-                text: "Hi! I am Shellie the turtle. I'm a good listener. What's on your mind today?"
+                text: "Hi! I am Shellie the turtle. I'm a good listener and I know lots of things, like the time and the weather. What's on your mind today?"
               });
             });
           },
           onmessage: async (message: LiveServerMessage) => {
+            // Handle Tool Calls
+            if (message.toolCall) {
+              for (const fc of message.toolCall.functionCalls) {
+                const result = await executeTool(fc.name, fc.args);
+                sessionPromise.then((session) => {
+                  session.sendToolResponse({
+                    functionResponses: {
+                      id: fc.id,
+                      name: fc.name,
+                      response: { result },
+                    }
+                  });
+                });
+              }
+            }
+
             if (message.serverContent?.inputTranscription) {
               const text = message.serverContent.inputTranscription.text;
               setCurrentLiveSpeech(prev => (prev + text).slice(-100));
@@ -209,14 +296,22 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
           },
+          tools: [{ functionDeclarations: toolDeclarations }],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: `You are Shellie the Emotional Turtle. Wise, funny, concise, and incredibly patient. Your goal is to support children age 4-10 in an elementary school setting. Be Kind, concise, and prioritize listening. Detect behavioral shifts like loneliness or bullying and offer gentle validation. Use context: ${contextString}`
+          systemInstruction: `You are Shellie the Emotional Turtle. Wise, funny, concise, and incredibly patient. Your goal is to support children age 4-10 in an elementary school setting. 
+
+          CORE RULES:
+          1. Be Kind, concise, and prioritize listening.
+          2. Detect behavioral shifts like loneliness or bullying and offer gentle validation.
+          3. Use context: ${contextString}
+          4. ANTI-HALLUCINATION: If the user asks for the time, weather, or their location, ALWAYS use the provided tools. Do not guess.
+          5. If asked general knowledge questions (e.g. "why is the sky blue?"), answer truthfully and simply for a child to understand.`
         }
       });
       sessionPromiseRef.current = sessionPromise;
     } catch (err) {
-      alert("Please allow microphone access to talk to Shellie!");
+      alert("Please allow microphone and location access to talk to Shellie!");
       stopConversation();
     }
   };
@@ -227,7 +322,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center bg-[#f0fdf4] dark:bg-slate-950 transition-colors duration-500">
+    <div className={`min-h-screen flex flex-col items-center bg-[#f0fdf4] dark:bg-slate-950 transition-colors duration-500 overflow-x-hidden ${isSessionActive ? 'fixed inset-0 h-full overflow-hidden' : ''}`}>
       <DynamicIsland 
         isActive={isSessionActive} 
         isSpeaking={isSpeaking}
@@ -239,40 +334,43 @@ const App: React.FC = () => {
         onClear={clearCurrentHistory}
       />
 
-      <header className="w-full max-w-6xl flex justify-between items-center p-4 md:p-8 sticky top-0 bg-[#f0fdf4]/90 dark:bg-slate-950/90 backdrop-blur-xl z-[60] border-b border-green-100/20 dark:border-white/5">
-        <div 
-          className="flex items-center gap-3 cursor-pointer group" 
-          onClick={() => { window.scrollTo({ top: 0, behavior: 'smooth' }); setRoute(AppRoute.HOME); }}
-        >
-          <div className="bg-green-600 p-2.5 rounded-2xl text-white shadow-lg group-hover:rotate-6 transition-transform">
-             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-          </div>
-          <div className="flex flex-col">
-            <h1 className="text-xl md:text-2xl font-black text-green-900 dark:text-green-50 leading-none">Shellie</h1>
-            <div className="flex items-center gap-1 mt-0.5">
-              <span className="text-[8px] md:text-[10px] uppercase font-black tracking-widest text-green-600 dark:text-green-400">
-                {isSessionActive ? 'In Session' : 'Safe Guard Active'}
-              </span>
+      {/* Conditional Header */}
+      {(!isSessionActive || route === AppRoute.TEACHER) && (
+        <header className="w-full max-w-6xl flex justify-between items-center p-4 md:p-8 sticky top-0 bg-[#f0fdf4]/90 dark:bg-slate-950/90 backdrop-blur-xl z-[60] border-b border-green-100/20 dark:border-white/5 animate-in fade-in duration-500">
+          <div 
+            className="flex items-center gap-3 cursor-pointer group" 
+            onClick={() => { window.scrollTo({ top: 0, behavior: 'smooth' }); setRoute(AppRoute.HOME); }}
+          >
+            <div className="bg-green-600 p-2.5 rounded-2xl text-white shadow-lg group-hover:rotate-6 transition-transform">
+               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+            </div>
+            <div className="flex flex-col">
+              <h1 className="text-xl md:text-2xl font-black text-green-900 dark:text-green-50 leading-none">Shellie</h1>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className="text-[8px] md:text-[10px] uppercase font-black tracking-widest text-green-600 dark:text-green-400">
+                  {isSessionActive ? 'In Session' : 'Safe Guard Active'}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => setRoute(route === AppRoute.HOME ? AppRoute.TEACHER : AppRoute.HOME)}
-            className="text-[10px] md:text-sm font-black text-green-700 dark:text-green-400 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md px-4 md:px-6 py-2 md:py-3 rounded-full hover:bg-green-50 dark:hover:bg-slate-800 transition-all active:scale-95 border border-green-100 dark:border-white/10 flex items-center gap-2"
-          >
-            {route === AppRoute.HOME ? (
-              <><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg> Dashboard</>
-            ) : (
-              <><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg> Back</>
-            )}
-          </button>
-        </div>
-      </header>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setRoute(route === AppRoute.HOME ? AppRoute.TEACHER : AppRoute.HOME)}
+              className="text-[10px] md:text-sm font-black text-green-700 dark:text-green-400 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md px-4 md:px-6 py-2 md:py-3 rounded-full hover:bg-green-50 dark:hover:bg-slate-800 transition-all active:scale-95 border border-green-100 dark:border-white/10 flex items-center gap-2"
+            >
+              {route === AppRoute.HOME ? (
+                <><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg> Dashboard</>
+              ) : (
+                <><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg> Back</>
+              )}
+            </button>
+          </div>
+        </header>
+      )}
 
       <main className={`w-full flex-grow flex flex-col transition-all duration-300 ${route === AppRoute.TEACHER ? 'max-w-6xl py-6 md:py-12' : 'max-w-4xl'}`}>
         {route === AppRoute.HOME ? (
-          <div className="flex flex-col items-center justify-center min-h-[calc(100vh-120px)] w-full py-8">
+          <div className={`flex flex-col items-center justify-center w-full py-8 transition-all ${isSessionActive ? 'h-screen fixed inset-0 z-50 bg-[#f0fdf4] dark:bg-slate-950' : 'min-h-[calc(100vh-120px)]'}`}>
             <div className="w-full text-center space-y-6 flex flex-col items-center">
               <div className="space-y-2 px-2 animate-in fade-in slide-in-from-top-4 duration-1000">
                 <h2 className="text-5xl md:text-8xl font-black text-green-950 dark:text-green-50 tracking-tighter">
@@ -348,6 +446,7 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {/* Only show marketing if session is NOT active */}
             {!isSessionActive && <MarketingSection onTalkClick={handleTalkClick} />}
           </div>
         ) : (
@@ -360,11 +459,14 @@ const App: React.FC = () => {
         )}
       </main>
 
-      <footer className="w-full py-12 md:py-20 text-center bg-green-950 dark:bg-black text-green-200/40 dark:text-green-400/20 px-4">
-        <p className="text-[9px] md:text-xs uppercase font-black tracking-[0.4em]">
-          Empathetic Infrastructure • K-5 SAFEGUARD CERTIFIED • © 2025 Shellie AI
-        </p>
-      </footer>
+      {/* Conditional Footer */}
+      {!isSessionActive && (
+        <footer className="w-full py-12 md:py-20 text-center bg-green-950 dark:bg-black text-green-200/40 dark:text-green-400/20 px-4">
+          <p className="text-[9px] md:text-xs uppercase font-black tracking-[0.4em]">
+            Empathetic Infrastructure • K-5 SAFEGUARD CERTIFIED • © 2025 Shellie AI
+          </p>
+        </footer>
+      )}
     </div>
   );
 };
