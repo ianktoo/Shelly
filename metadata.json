@@ -1,0 +1,7 @@
+{
+  "name": "Shellie the Emotional Turtle",
+  "description": "A kind and funny AI turtle that listens to children, provides emotional support, and monitors for safety concerns.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
